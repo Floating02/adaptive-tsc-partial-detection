@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SUMO
+*.sumocfg
+*.net.xml
+*.rou.xml
+*.edg.xml
+*.nod.xml
+*.typ.xml
+
+# Outputs
+outputs/
+optimization/logs/
+optimization/results/
+
+# Models
+models/*.zip
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# OS
+.DS_Store
+Thumbs.db
