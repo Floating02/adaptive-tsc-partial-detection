@@ -20,6 +20,8 @@ from stable_baselines3.dqn.dqn import DQN
 from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 
 # 设置SUMO环境变量
+# 注意：在Windows多进程环境下，Libsumo可能与SubprocVecEnv存在兼容性问题
+# 如果遇到问题，可以尝试禁用Libsumo（注释下面这一行）
 os.environ["LIBSUMO_AS_TRACI"] = "1"
 
 if "SUMO_HOME" in os.environ:
@@ -29,10 +31,16 @@ else:
     sys.exit("Please declare the environment variable 'SUMO_HOME'")
 
 # 添加项目根目录到Python路径
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sumo_rl import SumoEnvironment
-from sumo_rl_custom.observations.table_i_observation import TableIObservationFunction
-from sumo_rl_custom.rewards import mixed_reward
+from observations.observation import TableIObservationFunction
+from rewards import average_speed_reward, mixed_reward
+
+# 奖励函数映射表（与 train.py 保持一致）
+REWARD_FUNCTIONS = {
+    'average-speed': average_speed_reward,
+    'mixed': mixed_reward,
+}
 
 def parse_args():
     """解析命令行参数"""
@@ -43,6 +51,9 @@ def parse_args():
                         help="Path to the pre-trained model, e.g., models/dqn_table_i_dr0.7")
     parser.add_argument("--detection_rate", type=float, default=0.7,
                         help="Probability of vehicles being detected (between 0 and 1)")
+    parser.add_argument("--reward_fn", type=str, default='mixed',
+                        choices=['average-speed', 'mixed'],
+                        help="Reward function used during training: 'average-speed' or 'mixed'")
     
     # 环境参数
     parser.add_argument("--gui", action="store_true", 
@@ -62,7 +73,7 @@ def parse_args():
     
     return parser.parse_args()
 
-def create_rl_env(net_file, route_file, use_gui, detection_rate, eval_duration, seed=None):
+def create_rl_env(net_file, route_file, use_gui, detection_rate, eval_duration, reward_fn='mixed', seed=None):
     """创建RL评估环境
     
     Args:
@@ -71,6 +82,7 @@ def create_rl_env(net_file, route_file, use_gui, detection_rate, eval_duration, 
         use_gui (bool): Whether to use SUMO GUI
         detection_rate (float): Probability of vehicles being detected
         eval_duration (int): Evaluation duration (seconds)
+        reward_fn (str): Reward function name ('average-speed' or 'mixed')
         seed (int, optional): Random seed
         
     Returns:
@@ -79,6 +91,16 @@ def create_rl_env(net_file, route_file, use_gui, detection_rate, eval_duration, 
     # 设置随机种子
     if seed is not None:
         np.random.seed(seed)
+    
+    # 获取奖励函数
+    if isinstance(reward_fn, str):
+        if reward_fn not in REWARD_FUNCTIONS:
+            raise ValueError(f"Unknown reward function: {reward_fn}. Available: {list(REWARD_FUNCTIONS.keys())}")
+        reward_function = REWARD_FUNCTIONS[reward_fn]
+    elif callable(reward_fn):
+        reward_function = reward_fn
+    else:
+        raise ValueError("reward_fn must be a string name or callable function")
     
     # 创建环境
     env = SumoEnvironment(
@@ -94,15 +116,15 @@ def create_rl_env(net_file, route_file, use_gui, detection_rate, eval_duration, 
         max_green=50,
         enforce_max_green=True,
         single_agent=True,
-        reward_fn=mixed_reward,
-        observation_class=lambda ts: TableIObservationFunction(ts, detection_rate=detection_rate),
+        reward_fn=reward_function,  # 使用配置的奖励函数
+        observation_class=lambda ts: TableIObservationFunction(ts, detection_rate=detection_rate, seed=seed + 4000 if seed is not None else None),
         sumo_seed=seed,
         add_system_info=True,  # Add system-level info for evaluation
     )
     
     return env
 
-def create_fixed_env(net_file, route_file, use_gui, eval_duration, seed=None):
+def create_fixed_env(net_file, route_file, use_gui, eval_duration, seed=None, detection_rate=0.7):
     """创建固定信号控制环境
     
     Args:
@@ -111,6 +133,7 @@ def create_fixed_env(net_file, route_file, use_gui, eval_duration, seed=None):
         use_gui (bool): Whether to use SUMO GUI
         eval_duration (int): Evaluation duration (seconds)
         seed (int, optional): Random seed
+        detection_rate (float, optional): 检测率，用于保持与RL评估的观测空间一致性
         
     Returns:
         SumoEnvironment: Created SUMO environment
@@ -134,6 +157,7 @@ def create_fixed_env(net_file, route_file, use_gui, eval_duration, seed=None):
         enforce_max_green=True,
         single_agent=True,
         reward_fn="average-speed",
+        observation_class=lambda ts: TableIObservationFunction(ts, detection_rate=detection_rate, seed=seed + 6000 if seed is not None else None),
         sumo_seed=seed,
         add_system_info=True,  # Add system-level info for evaluation
         fixed_ts=True,  # 使用固定信号控制
@@ -197,7 +221,7 @@ def evaluate_rl_model(model, env, n_episodes=5):
             info = None
             
             # 运行一个episode
-            while not done:
+            while not done.any():
                 try:
                     # 预测动作
                     action, _ = model.predict(obs, deterministic=True)
@@ -250,7 +274,7 @@ def evaluate_fixed_signal(env, n_episodes=5):
     """评估固定信号控制性能
     
     Args:
-        env: 评估环境
+        env: 评估环境（已用DummyVecEnv包装）
         n_episodes (int): 评估轮数
         
     Returns:
@@ -276,14 +300,11 @@ def evaluate_fixed_signal(env, n_episodes=5):
             info = None
             
             # 运行一个episode
-            while not done:
+            while not done.any():
                 try:
                     # 固定信号控制不需要动作，传入None
                     obs, reward, done, info = env.step(None)
-                    if isinstance(reward, list):
-                        episode_reward += reward[0]
-                    else:
-                        episode_reward += reward
+                    episode_reward += reward[0]
                 except Exception as e:
                     print(f"执行步骤时出错: {e}")
                     break
@@ -493,6 +514,7 @@ def run_evaluation(args):
             use_gui=args.gui,
             detection_rate=args.detection_rate,
             eval_duration=args.eval_duration,
+            reward_fn=args.reward_fn,  # 传递奖励函数参数
             seed=global_seed
         )
         
@@ -507,13 +529,17 @@ def run_evaluation(args):
             rl_env.norm_reward = False
         
         # 创建固定信号控制环境
-        fixed_env = create_fixed_env(
+        fixed_raw_env = create_fixed_env(
             net_file=args.net,
             route_file=args.route,
             use_gui=args.gui,
             eval_duration=args.eval_duration,
-            seed=global_seed
+            seed=global_seed,
+            detection_rate=args.detection_rate
         )
+        
+        # 包装固定信号控制环境（与RL评估一致）
+        fixed_env = wrap_env(fixed_raw_env)
         
         # 运行RL模型评估
         print(f"开始评估RL模型，共{args.n_runs}轮...")
@@ -576,6 +602,7 @@ if __name__ == "__main__":
     print("开始评估和对比脚本，参数如下:")
     print(f"  - 模型路径: {args.model_path}")
     print(f"  - 检测率: {args.detection_rate}")
+    print(f"  - 奖励函数: {args.reward_fn}")
     print(f"  - 评估次数: {args.n_runs}")
     print(f"  - 评估持续时间: {args.eval_duration}秒")
     print(f"  - 输出目录: {args.output_dir}")

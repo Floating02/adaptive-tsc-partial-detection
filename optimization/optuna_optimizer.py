@@ -31,6 +31,8 @@ from stable_baselines3.dqn.dqn import DQN
 from stable_baselines3.common.callbacks import EvalCallback
 
 # 设置SUMO环境变量
+# 注意：在Windows多进程环境下，Libsumo可能与SubprocVecEnv存在兼容性问题
+# 如果遇到问题，可以尝试禁用Libsumo（注释下面这一行）
 os.environ["LIBSUMO_AS_TRACI"] = "1"
 
 if "SUMO_HOME" in os.environ:
@@ -39,11 +41,11 @@ if "SUMO_HOME" in os.environ:
 else:
     sys.exit("请声明环境变量'SUMO_HOME'")
 
-# 将项目根目录添加到Python路径
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+# 将项目根目录添加到Python路径（从 optimization 目录向上一级）
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sumo_rl import SumoEnvironment
-from sumo_rl_custom.observations.table_i_observation import TableIObservationFunction
-from sumo_rl_custom.rewards import mixed_reward
+from observations.observation import TableIObservationFunction
+from rewards import mixed_reward
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -97,7 +99,7 @@ def make_env(net_file, route_file, out_csv_name, detection_rate, seed=42, use_gu
             enforce_max_green=True,
             single_agent=True,
             reward_fn=mixed_reward,
-            observation_class=lambda ts: TableIObservationFunction(ts, detection_rate=detection_rate),
+            observation_class=lambda ts: TableIObservationFunction(ts, detection_rate=detection_rate, seed=seed + 5000),
             sumo_seed=seed,
         )
         return env
@@ -291,14 +293,15 @@ def optimize_agent(trial, config):
                 obs = eval_env.reset()
                 done = False
                 episode_reward = 0
-                while not done:
+                while not done.any():
                     action, _ = model.predict(obs, deterministic=True)
                     obs, reward, done, info = eval_env.step(action)
-                    episode_reward += reward
+                    episode_reward += reward[0]
                 mean_reward += episode_reward / 5
             return mean_reward
         
-        return eval_callback.best_mean_reward
+        # 返回最后的奖励，代表最终收敛状态的性能
+        return eval_callback.last_mean_reward
         
     except Exception as e:
         # 记录异常
