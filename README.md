@@ -1,4 +1,4 @@
-# SUMO-RL 交通信号控制强化学习项目
+# Adaptive TSC Partial Detection
 
 基于 SUMO (Simulation of Urban MObility) 仿真器与深度 Q 网络 (DQN) 的自适应交通信号控制系统。本项目在部分车辆检测（Partial Detection）场景下，利用强化学习算法优化单交叉口的信号配时策略，相比传统固定周期控制可显著降低车辆等待时间与队列长度。
 
@@ -105,7 +105,7 @@
 ## 项目结构
 
 ```
-sumo-rl-custom/
+adaptive-tsc-partial-detection/
 ├── observations/
 │   └── observation.py          # TableIObservationFunction 部分检测观测函数
 ├── models/
@@ -196,8 +196,8 @@ $env:SUMO_HOME    # Windows PowerShell
 ### 2. 克隆项目
 
 ```bash
-git clone https://github.com/yourusername/sumo-rl-custom.git
-cd sumo-rl-custom
+git clone https://github.com/yourusername/adaptive-tsc-partial-detection.git
+cd adaptive-tsc-partial-detection
 ```
 
 ### 3. 安装 Python 依赖
@@ -605,7 +605,7 @@ python optimization/optuna_optimizer.py
 ```
 MIT License
 
-Copyright (c) 2026 SUMO-RL Custom
+Copyright (c) 2026 Adaptive TSC Partial Detection
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
