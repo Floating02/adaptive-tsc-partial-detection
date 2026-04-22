@@ -1,0 +1,50 @@
+{
+  "experiment_type": "small_batch_multi_seed",
+  "timestamp": "2026-04-19T13:35:26.627254",
+  "seeds": [
+    42
+  ],
+  "num_configs_per_seed": 1,
+  "fixed_baseline": {
+    "mean_reward": 10.19031591987398,
+    "std_reward": 0.0,
+    "mean_waiting_time": 11.156035508353066,
+    "std_waiting_time": 0.0,
+    "mean_queue_length": 7.0,
+    "std_queue_length": 0.0,
+    "mean_speed": 7.611567514596146,
+    "std_speed": 0.0,
+    "mean_throughput": 136.66666666666666,
+    "std_throughput": 0.0
+  },
+  "aggregated_results": [
+    {
+      "detection_rate": 0.5,
+      "reward_fn": "average-speed",
+      "n_seeds": 1,
+      "eval_results": {
+        "mean_reward": 10.190315910382196,
+        "std_reward": 0.0,
+        "min_reward": 10.190315910382196,
+        "max_reward": 10.190315910382196,
+        "n_seeds": 1,
+        "mean_waiting_time": 11.156035508353066,
+        "std_waiting_time": 0.0,
+        "min_waiting_time": 11.156035508353066,
+        "max_waiting_time": 11.156035508353066,
+        "mean_queue_length": 7.0,
+        "std_queue_length": 0.0,
+        "min_queue_length": 7.0,
+        "max_queue_length": 7.0,
+        "mean_speed": 7.611567514596146,
+        "std_speed": 0.0,
+        "min_speed": 7.611567514596146,
+        "max_speed": 7.611567514596146,
+        "mean_throughput": 136.66666666666666,
+        "std_throughput": 0.0,
+        "min_throughput": 136.66666666666666,
+        "max_throughput": 136.66666666666666
+      }
+    }
+  ]
+}

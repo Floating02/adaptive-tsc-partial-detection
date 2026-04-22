@@ -3,6 +3,9 @@ numpy>=2.1.3
 pandas>=2.2.3
 matplotlib>=3.10.1
 seaborn>=0.13.2
+scipy>=1.11.0
+
+# 深度学习框架
 torch>=2.8.0
 
 # 强化学习库
@@ -16,7 +19,13 @@ pettingzoo>=1.24.3
 # 超参数优化
 optuna>=3.6.1
 
-# SUMO相关
+# SUMO交通仿真
 eclipse-sumo>=1.22.0
 sumolib>=1.22.0
 traci>=1.22.0
+
+# 构建工具（解决Python 3.10+ distutils废弃问题）
+setuptools>=65.0.0
+
+# 开发测试工具
+pytest>=7.4.0

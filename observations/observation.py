@@ -23,11 +23,12 @@ class TableIObservationFunction(ObservationFunction):
     """用于部分检测车辆的观察类
     
     状态表示包括（所有特征均已归一化）：
-    - 检测车辆数量：每个路径上检测到的车辆数量，除以车道最大容量，范围 0-1
-    - 最近车辆距离：每个路径上最近检测车辆的距离，除以车道长度，范围 0-1
+    - 检测车辆数量（带符号）：每个路径上检测到的车辆数量，除以车道最大容量；
+      绿灯车道为正值，红灯车道为负值，范围 -1 到 1
+    - 最近车辆距离（带符号）：每个路径上最近检测车辆的距离，除以车道长度；
+      绿灯车道为正值，红灯车道为负值，范围 -1 到 1
     - 当前相位时间：从当前相位开始到现在的持续时间（秒），除以最大相位时长，范围 0-1
-    - 黄灯指示器：黄灯相位指示器（one-hot编码）
-    - 当前相位：当前绿灯相位的one-hot编码
+    - 黄灯指示器：黄灯相位指示器（0或1）
     - 当前时间：一天中的当前时间（午夜后的小时数），归一化到0-1（除以24）
     
     属性:
@@ -69,72 +70,47 @@ class TableIObservationFunction(ObservationFunction):
         
         Returns:
             np.ndarray: 观察向量
-        """
-        # 更新被检测到的车辆
+         """
         self._update_detected_vehicles()
         
-        # 一次遍历车道，同时计算车辆数和最近距离
-        normalized_car_counts = []
-        normalized_distances = []
+        current_state = self.ts.sumo.trafficlight.getRedYellowGreenState(self.ts.id)
+        controlled_links = self.ts.sumo.trafficlight.getControlledLinks(self.ts.id)
+        
+        signed_car_counts = []
+        signed_distances = []
         
         for lane in self.ts.lanes:
-            # 获取车道上所有车辆
             veh_list = self.ts.sumo.lane.getLastStepVehicleIDs(lane)
-            # 筛选被检测到的车辆
             detected_veh_list = [veh for veh in veh_list if veh in self.detected_vehicles and self.detected_vehicles[veh]]
             
-            # 计算检测车辆数并归一化
             detected_count = len(detected_veh_list)
-            normalized_car_counts.append(min(detected_count / self.max_car_capacity, 1.0))
+            normalized_count = min(detected_count / self.max_car_capacity, 1.0)
             
-            # 计算最近车辆距离并归一化
             lane_length = self.ts.lanes_length[lane]
-            if detected_veh_list:  # 如果有被检测到的车辆
-                # 获取各车辆位置
+            if detected_veh_list:
                 positions = [lane_length - self.ts.sumo.vehicle.getLanePosition(veh) for veh in detected_veh_list]
-                # 最近的车辆距离
                 min_distance = min(positions)
-            else:  # 如果没有被检测到的车辆，设为车道长度
+            else:
                 min_distance = lane_length
+            normalized_distance = min_distance / lane_length
             
-            normalized_distances.append(min_distance / lane_length)
+            is_green = self._is_lane_green(lane, current_state, controlled_links)
+            sign = 1.0 if is_green else -1.0
+            
+            signed_car_counts.append(sign * normalized_count)
+            signed_distances.append(sign * normalized_distance)
         
-        # 当前相位持续时间，归一化到0-1范围
-        normalized_phase_time = [min(float(self.ts.time_since_last_phase_change) / self.max_phase_duration, 1.0)]
+        normalized_phase_time = [min(float(self.ts.time_since_last_phase_change) / self.ts.max_green_time, 1.0)]
         
-        # 黄灯相位指示器(one-hot编码)
-        amber_phase = [1.0 if self.ts.is_yellow else 0.0, 0.0 if self.ts.is_yellow else 1.0]
+        amber_phase = [1.0 if self.ts.is_yellow else 0.0]
         
-        # 处理固定时间交通信号灯模式 (fixed_ts=True)
-        # 确保 n_phases 至少为 1，避免观察空间维度动态变化
-        if hasattr(self.ts, 'green_phases'):
-            n_phases = max(1, len(self.ts.green_phases))
-            # 当前绿灯相位的one-hot编码
-            current_phase_onehot = [0.0] * n_phases
-            if not self.ts.is_yellow:  # 不在黄灯相位时
-                current_phase_onehot[self.ts.green_phase] = 1.0
-        elif hasattr(self.ts, 'num_green_phases'):
-            # fixed_ts模式下
-            n_phases = max(1, self.ts.num_green_phases)
-            # 当前绿灯相位的one-hot编码
-            current_phase_onehot = [0.0] * n_phases
-            if not self.ts.is_yellow:  # 不在黄灯相位时
-                current_phase_onehot[self.ts.green_phase] = 1.0
-        else:
-            # 如果都没有，默认为1个相位，确保维度固定
-            n_phases = 1
-            current_phase_onehot = [0.0] * n_phases
-        
-        # 当前时间（一天中的小时数，归一化到0-1）
         current_time = [float(self.ts.env.sim_step % (24 * 3600)) / (24 * 3600)]
         
-        # 合并所有观察值
         observation = np.array(
-            normalized_car_counts + 
-            normalized_distances + 
+            signed_car_counts + 
+            signed_distances + 
             normalized_phase_time + 
             amber_phase + 
-            current_phase_onehot + 
             current_time, 
             dtype=np.float32
         )
@@ -148,6 +124,25 @@ class TableIObservationFunction(ObservationFunction):
         该方法保留为未来优化预留接口。
         """
         self.detected_vehicles.clear()
+    
+    def _is_lane_green(self, lane: str, current_state: str, controlled_links: list) -> bool:
+        """判断车道在当前信号状态下是否为绿灯
+        
+        Args:
+            lane: 车道ID
+            current_state: 当前信号灯状态字符串（如"GGgrrrGGgrrr"）
+            controlled_links: 受控连接列表，由getControlledLinks返回
+            
+        Returns:
+            bool: 如果车道任意连接方向为绿灯则返回True，否则返回False
+        """
+        for link_idx, link_group in enumerate(controlled_links):
+            for link_tuple in link_group:
+                if link_tuple[0] == lane:
+                    if current_state[link_idx] in ('G', 'g'):
+                        return True
+                    break
+        return False
     
     def _update_detected_vehicles(self):
         """更新被检测到的车辆列表
@@ -175,49 +170,33 @@ class TableIObservationFunction(ObservationFunction):
     def observation_space(self) -> spaces.Box:
         """定义观察空间
         
-        观察空间的维度由以下部分组成（所有特征均已归一化）：
-        - 各车道检测车辆数量 (0-1)
-        - 各车道最近检测车辆距离 (0-1)
+        观察空间的维度由以下部分组成：
+        - 各车道检测车辆数量（带符号，绿灯为正、红灯为负，-1到1）
+        - 各车道最近检测车辆距离（带符号，绿灯为正、红灯为负，-1到1）
         - 当前相位时间 (0-1)
-        - 黄灯相位指示器(one-hot编码, 2维)
-        - 当前绿灯相位(one-hot编码)
+        - 黄灯相位指示器 (0或1)
         - 当前时间 (0-1)
         
         Returns:
             spaces.Box: 观察空间
         """
-        # 计算观察空间的维度
         n_lanes = len(self.ts.lanes)
         
-        # 处理固定时间交通信号灯模式 (fixed_ts=True)
-        # 确保 n_phases 至少为 1，与 __call__ 方法保持一致
-        if hasattr(self.ts, 'green_phases'):
-            n_phases = max(1, len(self.ts.green_phases))
-        elif hasattr(self.ts, 'num_green_phases'):
-            # fixed_ts模式下使用num_green_phases
-            n_phases = max(1, self.ts.num_green_phases)
-        else:
-            # 如果都没有，默认为1
-            n_phases = 1
-        
-        # 设置上下界
         return spaces.Box(
             low=np.array(
-                [0] * n_lanes +        # 归一化车辆数（0-1）
-                [0] * n_lanes +        # 归一化距离（0-1）
-                [0] +                  # 归一化相位时间（0-1）
-                [0, 0] +               # 黄灯指示器(one-hot, 2维)
-                [0] * n_phases +       # 当前相位(one-hot)
-                [0],                   # 当前时间（0-1）
+                [-1] * n_lanes +       
+                [-1] * n_lanes +       
+                [0] +                  
+                [0] +                  
+                [0],                   
                 dtype=np.float32
             ),
             high=np.array(
-                [1] * n_lanes +        # 归一化车辆数（0-1）
-                [1] * n_lanes +        # 归一化距离（0-1）
-                [1] +                  # 归一化相位时间（0-1）
-                [1, 1] +               # 黄灯指示器(one-hot, 2维)
-                [1] * n_phases +       # 当前相位(one-hot)
-                [1],                   # 当前时间（0-1）
+                [1] * n_lanes +        
+                [1] * n_lanes +        
+                [1] +                  
+                [1] +                  
+                [1],                   
                 dtype=np.float32
             ),
         )

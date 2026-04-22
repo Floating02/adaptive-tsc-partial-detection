@@ -1,0 +1,2 @@
+detection_rate,reward_fn,seed,train_duration_sec,mean_reward,std_reward,mean_waiting_time,std_waiting_time,mean_queue_length,std_queue_length,mean_speed,std_speed,mean_throughput,std_throughput
+0.5,average-speed,42,4.369878053665161,10.190315910382196,1.2264313661636148,11.156035508353066,8.982481748213734,7.0,2.943920288775949,7.611567514596146,4.1683053036902535,136.66666666666666,49.412099283025356
