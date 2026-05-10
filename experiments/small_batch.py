@@ -33,7 +33,7 @@ from itertools import product
 from pathlib import Path
 
 from stable_baselines3.dqn.dqn import DQN
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, VecNormalize, DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, VecNormalize
 
 os.environ["LIBSUMO_AS_TRACI"] = "1"
 
@@ -45,20 +45,13 @@ else:
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sumo_rl import SumoEnvironment
-from observations.observation import TableIObservationFunction
+from observations.observation import PartialObservationFunction
 from rewards import average_speed_reward, mixed_reward
 
 REWARD_FUNCTIONS = {
     'average-speed': average_speed_reward,
     'mixed': mixed_reward,
 }
-
-EVALUATION_TIME_POINTS = [
-    28800,   # 08:00 早高峰
-    43200,   # 12:00 平峰
-    61200,   # 17:00 晚高峰
-]
-
 
 def linear_schedule(initial_value: float):
     def func(progress_remaining: float) -> float:
@@ -80,14 +73,11 @@ def make_env(net_file, route_file, detection_rate, reward_fn, seed=42, env_index
         torch.manual_seed(env_seed)
         python_random.seed(env_seed)
 
-        rng = np.random.RandomState(env_seed + 1000)
-        start_time = int(rng.randint(0, 86400 - sim_duration))
-
         env = SumoEnvironment(
             net_file=net_file,
             route_file=route_file,
             use_gui=use_gui,
-            begin_time=start_time,
+            begin_time=0,
             num_seconds=sim_duration,
             delta_time=5,
             yellow_time=3,
@@ -96,7 +86,7 @@ def make_env(net_file, route_file, detection_rate, reward_fn, seed=42, env_index
             enforce_max_green=True,
             single_agent=True,
             reward_fn=reward_function,
-            observation_class=lambda ts: TableIObservationFunction(
+            observation_class=lambda ts: PartialObservationFunction(
                 ts, detection_rate=detection_rate, seed=env_seed + 2000
             ),
             sumo_seed=env_seed,
@@ -126,7 +116,7 @@ def train_single_config(detection_rate, reward_fn_name, total_timesteps, n_envs,
 
     env = SubprocVecEnv(env_fns)
     env = VecMonitor(env)
-    env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=10.0, gamma=0.99, epsilon=1e-8)
+    env = VecNormalize(env, norm_obs=False, norm_reward=True, clip_obs=10.0, gamma=0.99, epsilon=1e-8)
 
     policy_kwargs = dict(net_arch=[256, 256])
 
@@ -157,7 +147,6 @@ def train_single_config(detection_rate, reward_fn_name, total_timesteps, n_envs,
 
     model_path = f"{output_dir}/models/dqn_table_i_dr{detection_rate}_{reward_fn_name}_seed{seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     model.save(model_path)
-    env.save(f"{model_path}_vec_normalize.pkl")
     env.close()
 
     print(f"训练完成，耗时 {train_duration:.1f} 秒")
@@ -172,65 +161,53 @@ def evaluate_model(model_path, detection_rate, reward_fn_name, net_file, route_f
 
     model = DQN.load(model_path)
     reward_function = REWARD_FUNCTIONS[reward_fn_name]
-    norm_path = f"{model_path}_vec_normalize.pkl"
 
     all_metrics = {
         'rewards': [], 'waiting_times': [], 'queue_lengths': [],
         'speeds': [], 'throughputs': []
     }
 
-    for time_idx, begin_time in enumerate(EVALUATION_TIME_POINTS):
-        print(f"  时间点 {time_idx + 1}/{len(EVALUATION_TIME_POINTS)}: begin_time={begin_time} ({begin_time//3600:02d}:{(begin_time%3600)//60:02d})")
-        
-        for ep in range(n_eval_episodes):
-            eval_env = SumoEnvironment(
-                net_file=net_file,
-                route_file=route_file,
-                use_gui=False,
-                begin_time=begin_time,
-                num_seconds=eval_duration,
-                delta_time=5,
-                yellow_time=3,
-                min_green=5,
-                max_green=50,
-                enforce_max_green=True,
-                single_agent=True,
-                reward_fn=reward_function,
-                observation_class=lambda ts, t_idx=time_idx, e_idx=ep: TableIObservationFunction(
-                    ts, detection_rate=detection_rate, seed=seed + 4000 + t_idx * 100 + e_idx
-                ),
-                sumo_seed=seed + time_idx * 100 + ep,
-                add_system_info=True,
-            )
+    for ep in range(n_eval_episodes):
+        eval_env = SumoEnvironment(
+            net_file=net_file,
+            route_file=route_file,
+            use_gui=False,
+            begin_time=0,
+            num_seconds=eval_duration,
+            delta_time=5,
+            yellow_time=3,
+            min_green=5,
+            max_green=50,
+            enforce_max_green=True,
+            single_agent=True,
+            reward_fn=reward_function,
+            observation_class=lambda ts, e_idx=ep: PartialObservationFunction(
+                ts, detection_rate=detection_rate, seed=seed + 4000 + e_idx
+            ),
+            sumo_seed=seed + ep,
+            add_system_info=True,
+        )
 
-            eval_env = DummyVecEnv([lambda: eval_env])
-            eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False,
-                                    clip_obs=10.0, gamma=0.99, epsilon=1e-8, training=False)
+        obs, _ = eval_env.reset()
+        episode_reward = 0
+        done = False
+        info = None
 
-            if os.path.exists(norm_path):
-                eval_env = VecNormalize.load(norm_path, eval_env)
-                eval_env.training = False
-                eval_env.norm_reward = False
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, info = eval_env.step(action)
+            done = terminated or truncated
+            episode_reward += reward
 
-            obs = eval_env.reset()
-            episode_reward = 0
-            done = np.array([False])
-            info = None
+        all_metrics['rewards'].append(episode_reward)
+        if info is not None and len(info) > 0:
+            info_dict = info[0]
+            all_metrics['waiting_times'].append(info_dict.get('system_mean_waiting_time', 0))
+            all_metrics['queue_lengths'].append(info_dict.get('system_total_stopped', 0))
+            all_metrics['speeds'].append(info_dict.get('system_mean_speed', 0))
+            all_metrics['throughputs'].append(info_dict.get('system_total_departed', 0))
 
-            while not done.any():
-                action, _ = model.predict(obs, deterministic=True)
-                obs, reward, done, info = eval_env.step(action)
-                episode_reward += reward[0]
-
-            all_metrics['rewards'].append(episode_reward)
-            if info is not None and len(info) > 0:
-                info_dict = info[0]
-                all_metrics['waiting_times'].append(info_dict.get('system_mean_waiting_time', 0))
-                all_metrics['queue_lengths'].append(info_dict.get('system_total_stopped', 0))
-                all_metrics['speeds'].append(info_dict.get('system_mean_speed', 0))
-                all_metrics['throughputs'].append(info_dict.get('system_total_departed', 0))
-
-            eval_env.close()
+        eval_env.close()
 
     results = {}
     for metric, values in all_metrics.items():
@@ -246,68 +223,6 @@ def evaluate_model(model_path, detection_rate, reward_fn_name, net_file, route_f
     return results
 
 
-def evaluate_fixed_baseline(net_file, route_file, eval_duration=3600, n_eval_episodes=2, seed=42):
-    print(f"\n评估固定信号控制基线 (seed={seed})...")
-
-    all_metrics = {
-        'rewards': [], 'waiting_times': [], 'queue_lengths': [],
-        'speeds': [], 'throughputs': []
-    }
-
-    for time_idx, begin_time in enumerate(EVALUATION_TIME_POINTS):
-        print(f"  时间点 {time_idx + 1}/{len(EVALUATION_TIME_POINTS)}: begin_time={begin_time} ({begin_time//3600:02d}:{(begin_time%3600)//60:02d})")
-        
-        for ep in range(n_eval_episodes):
-            eval_env = SumoEnvironment(
-                net_file=net_file,
-                route_file=route_file,
-                use_gui=False,
-                begin_time=begin_time,
-                num_seconds=eval_duration,
-                delta_time=5,
-                yellow_time=3,
-                min_green=5,
-                max_green=50,
-                enforce_max_green=True,
-                single_agent=True,
-                reward_fn="average-speed",
-                observation_class=lambda ts, t_idx=time_idx, e_idx=ep: TableIObservationFunction(
-                    ts, detection_rate=1.0, seed=seed + 6000 + t_idx * 100 + e_idx
-                ),
-                sumo_seed=seed + time_idx * 100 + ep,
-                add_system_info=True,
-                fixed_ts=True,
-            )
-
-            obs, _ = eval_env.reset()
-            episode_reward = 0
-            done = False
-            info = None
-
-            while not done:
-                obs, reward, terminated, truncated, info = eval_env.step(None)
-                done = terminated or truncated
-                episode_reward += reward
-
-            all_metrics['rewards'].append(episode_reward)
-            if info is not None:
-                all_metrics['waiting_times'].append(info.get('system_mean_waiting_time', 0))
-                all_metrics['queue_lengths'].append(info.get('system_total_stopped', 0))
-                all_metrics['speeds'].append(info.get('system_mean_speed', 0))
-                all_metrics['throughputs'].append(info.get('system_total_departed', 0))
-
-            eval_env.close()
-
-    results = {}
-    for metric, values in all_metrics.items():
-        if values:
-            results[f'mean_{metric[:-1]}'] = float(np.mean(values))
-            results[f'std_{metric[:-1]}'] = float(np.std(values))
-
-    print(f"  固定基线 - 平均等待时间: {results.get('mean_waiting_time', 0):.2f}")
-    print(f"  固定基线 - 平均速度: {results.get('mean_speed', 0):.4f}")
-
-    return results
 
 
 def aggregate_across_seeds(all_results, seeds):
@@ -350,7 +265,7 @@ def aggregate_across_seeds(all_results, seeds):
     return aggregated
 
 
-def generate_report(all_results, fixed_baselines, output_dir, seeds):
+def generate_report(all_results, output_dir, seeds, eval_route_labels):
     import pandas as pd
     import matplotlib
     matplotlib.use('Agg')
@@ -396,158 +311,142 @@ def generate_report(all_results, fixed_baselines, output_dir, seeds):
     df_agg.to_csv(agg_csv_path, index=False)
     print(f"聚合结果已保存到: {agg_csv_path}")
 
-    fixed_baseline = None
-    if fixed_baselines:
-        fixed_baseline = {}
-        for mk in fixed_baselines[0].keys():
-            if mk.startswith('mean_'):
-                values = [fb[mk] for fb in fixed_baselines if mk in fb]
-                if values:
-                    base = mk.replace('mean_', '')
-                    fixed_baseline[f'mean_{base}'] = float(np.mean(values))
-                    fixed_baseline[f'std_{base}'] = float(np.std(values))
-
     sns.set_style("whitegrid")
     plt.rcParams.update({'font.size': 11, 'figure.figsize': (14, 5), 'savefig.dpi': 200})
 
     key_metrics = [
-        ('mean_reward', '平均奖励'),
         ('mean_waiting_time', '平均等待时间 (秒)'),
         ('mean_queue_length', '平均队列长度'),
         ('mean_speed', '平均速度'),
     ]
 
-    fig, axes = plt.subplots(1, len(key_metrics), figsize=(5 * len(key_metrics), 5))
-    if len(key_metrics) == 1:
-        axes = [axes]
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-    for ax, (metric, title) in zip(axes, key_metrics):
-        if metric not in df_agg.columns:
+    for label in eval_route_labels:
+        label_prefix = f"{label}_"
+        route_metric_cols = {f"{label_prefix}{m}": t for m, t in key_metrics}
+        available_metrics = [(col, title) for col, title in route_metric_cols.items() if col in df_agg.columns]
+
+        if not available_metrics:
             continue
 
-        std_col = metric.replace('mean_', 'std_')
-        err = df_agg[std_col] if std_col in df_agg.columns else None
-
-        pivot_mean = df_agg.pivot(index='detection_rate', columns='reward_fn', values=metric)
-        if err is not None:
-            pivot_std = df_agg.pivot(index='detection_rate', columns='reward_fn', values=std_col)
-        else:
-            pivot_std = None
-
-        x = np.arange(len(pivot_mean.index))
-        width = 0.35
-        n_bars = len(pivot_mean.columns)
-
-        for j, col in enumerate(pivot_mean.columns):
-            offset = (j - n_bars / 2 + 0.5) * width
-            yerr = pivot_std[col].values if pivot_std is not None else None
-            bars = ax.bar(x + offset, pivot_mean[col].values, width,
-                          yerr=yerr, capsize=3, label=col, alpha=0.85)
-
-        if fixed_baseline and metric in fixed_baseline:
-            baseline_val = fixed_baseline[metric]
-            baseline_std = fixed_baseline.get(metric.replace('mean_', 'std_'), 0)
-            ax.axhline(y=baseline_val, color='red', linestyle='--', linewidth=1.5,
-                       label=f'固定信号基线 ({baseline_val:.2f}±{baseline_std:.2f})')
-
-        ax.set_title(title)
-        ax.set_xlabel('检测率')
-        ax.set_ylabel(title)
-        ax.set_xticks(x)
-        ax.set_xticklabels([str(v) for v in pivot_mean.index])
-        ax.legend(fontsize=8)
-
-    plt.tight_layout()
-    plot_path = os.path.join(output_dir, f"small_batch_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-    plt.savefig(plot_path)
-    plt.close()
-    print(f"对比图已保存到: {plot_path}")
-
-    if len(df_agg) >= 2:
-        radar_metrics = ['mean_waiting_time', 'mean_queue_length', 'mean_speed']
-        available = [m for m in radar_metrics if m in df_agg.columns]
-
-        if len(available) >= 2:
-            df_norm = df_agg.copy()
-            for metric in available:
-                max_val = df_agg[metric].max()
-                min_val = df_agg[metric].min()
-                if max_val > min_val:
-                    if metric in ['mean_waiting_time', 'mean_queue_length']:
-                        df_norm[metric] = 1 - (df_agg[metric] - min_val) / (max_val - min_val)
-                    else:
-                        df_norm[metric] = (df_agg[metric] - min_val) / (max_val - min_val)
-                else:
-                    df_norm[metric] = 1.0
-
-            angles = np.linspace(0, 2 * np.pi, len(available), endpoint=False).tolist()
-            angles += angles[:1]
-
-            labels_map = {
-                'mean_waiting_time': '等待时间',
-                'mean_queue_length': '队列长度',
-                'mean_speed': '速度',
-            }
-            categories = [labels_map.get(m, m) for m in available]
-            categories += categories[:1]
-
-            fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
-
-            for _, row in df_norm.iterrows():
-                label = f"DR={row['detection_rate']}, {row['reward_fn']}"
-                values = [row[m] for m in available]
-                values += values[:1]
-                ax.plot(angles, values, linewidth=1.5, label=label)
-                ax.fill(angles, values, alpha=0.05)
-
-            plt.xticks(angles[:-1], categories[:-1])
-            plt.ylim(0, 1)
-            plt.title('小批量实验性能雷达图 (跨seed均值)', size=14, y=1.08)
-            plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize=8)
-
-            radar_path = os.path.join(output_dir, f"small_batch_radar_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-            plt.savefig(radar_path, bbox_inches='tight')
-            plt.close()
-            print(f"雷达图已保存到: {radar_path}")
-
-    if len(df_per_seed) >= 4:
-        fig, axes = plt.subplots(1, len(key_metrics), figsize=(5 * len(key_metrics), 5))
-        if len(key_metrics) == 1:
+        fig, axes = plt.subplots(1, len(available_metrics), figsize=(5 * len(available_metrics), 5))
+        if len(available_metrics) == 1:
             axes = [axes]
 
-        for ax, (metric, title) in zip(axes, key_metrics):
-            if metric not in df_per_seed.columns:
-                continue
+        for ax, (metric, title) in zip(axes, available_metrics):
+            std_col = metric.replace('mean_', 'std_')
+            err = df_agg[std_col] if std_col in df_agg.columns else None
 
-            sns.boxplot(data=df_per_seed, x='detection_rate', y=metric,
-                        hue='reward_fn', ax=ax, palette='Set2')
-            sns.stripplot(data=df_per_seed, x='detection_rate', y=metric,
-                          hue='reward_fn', ax=ax, dodge=True, color='black',
-                          alpha=0.5, size=4)
+            pivot_mean = df_agg.pivot(index='detection_rate', columns='reward_fn', values=metric)
+            if err is not None:
+                pivot_std = df_agg.pivot(index='detection_rate', columns='reward_fn', values=std_col)
+            else:
+                pivot_std = None
 
-            if fixed_baseline and metric in fixed_baseline:
-                baseline_val = fixed_baseline[metric]
-                ax.axhline(y=baseline_val, color='red', linestyle='--', linewidth=1.5,
-                           label=f'固定信号基线')
+            x = np.arange(len(pivot_mean.index))
+            width = 0.35
+            n_bars = len(pivot_mean.columns)
 
-            ax.set_title(f'{title} (跨seed分布)')
+            for j, col in enumerate(pivot_mean.columns):
+                offset = (j - n_bars / 2 + 0.5) * width
+                yerr = pivot_std[col].values if pivot_std is not None else None
+                bars = ax.bar(x + offset, pivot_mean[col].values, width,
+                              yerr=yerr, capsize=3, label=col, alpha=0.85)
+
+            ax.set_title(f'{title} - {label}')
             ax.set_xlabel('检测率')
-            handles, labels = ax.get_legend_handles_labels()
-            n_unique = len(df_per_seed['reward_fn'].unique())
-            ax.legend(handles[:n_unique], labels[:n_unique], fontsize=8)
+            ax.set_ylabel(title)
+            ax.set_xticks(x)
+            ax.set_xticklabels([str(v) for v in pivot_mean.index])
+            ax.legend(fontsize=8)
 
         plt.tight_layout()
-        box_path = os.path.join(output_dir, f"small_batch_boxplot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-        plt.savefig(box_path)
+        plot_path = os.path.join(output_dir, f"small_batch_comparison_{label}_{timestamp}.png")
+        plt.savefig(plot_path)
         plt.close()
-        print(f"箱线图已保存到: {box_path}")
+        print(f"对比图已保存到: {plot_path}")
+
+        if len(df_agg) >= 2:
+            radar_metrics = [f'{label_prefix}mean_waiting_time', f'{label_prefix}mean_queue_length', f'{label_prefix}mean_speed']
+            available_radar = [m for m in radar_metrics if m in df_agg.columns]
+
+            if len(available_radar) >= 2:
+                df_norm = df_agg.copy()
+                for metric in available_radar:
+                    max_val = df_agg[metric].max()
+                    min_val = df_agg[metric].min()
+                    if max_val > min_val:
+                        if 'waiting_time' in metric or 'queue_length' in metric:
+                            df_norm[metric] = 1 - (df_agg[metric] - min_val) / (max_val - min_val)
+                        else:
+                            df_norm[metric] = (df_agg[metric] - min_val) / (max_val - min_val)
+                    else:
+                        df_norm[metric] = 1.0
+
+                angles = np.linspace(0, 2 * np.pi, len(available_radar), endpoint=False).tolist()
+                angles += angles[:1]
+
+                labels_map = {
+                    f'{label_prefix}mean_waiting_time': '等待时间',
+                    f'{label_prefix}mean_queue_length': '队列长度',
+                    f'{label_prefix}mean_speed': '速度',
+                }
+                categories = [labels_map.get(m, m) for m in available_radar]
+                categories += categories[:1]
+
+                fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
+
+                for _, row in df_norm.iterrows():
+                    plot_label = f"DR={row['detection_rate']}, {row['reward_fn']}"
+                    values = [row[m] for m in available_radar]
+                    values += values[:1]
+                    ax.plot(angles, values, linewidth=1.5, label=plot_label)
+                    ax.fill(angles, values, alpha=0.05)
+
+                plt.xticks(angles[:-1], categories[:-1])
+                plt.ylim(0, 1)
+                plt.title(f'性能雷达图 - {label} (跨seed均值)', size=14, y=1.08)
+                plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize=8)
+
+                radar_path = os.path.join(output_dir, f"small_batch_radar_{label}_{timestamp}.png")
+                plt.savefig(radar_path, bbox_inches='tight')
+                plt.close()
+                print(f"雷达图已保存到: {radar_path}")
+
+        if len(df_per_seed) >= 4:
+            fig, axes = plt.subplots(1, len(available_metrics), figsize=(5 * len(available_metrics), 5))
+            if len(available_metrics) == 1:
+                axes = [axes]
+
+            for ax, (metric, title) in zip(axes, available_metrics):
+                if metric not in df_per_seed.columns:
+                    continue
+
+                sns.boxplot(data=df_per_seed, x='detection_rate', y=metric,
+                            hue='reward_fn', ax=ax, palette='Set2')
+                sns.stripplot(data=df_per_seed, x='detection_rate', y=metric,
+                              hue='reward_fn', ax=ax, dodge=True, color='black',
+                              alpha=0.5, size=4)
+
+                ax.set_title(f'{title} - {label} (跨seed分布)')
+                ax.set_xlabel('检测率')
+                handles, labels = ax.get_legend_handles_labels()
+                n_unique = len(df_per_seed['reward_fn'].unique())
+                ax.legend(handles[:n_unique], labels[:n_unique], fontsize=8)
+
+            plt.tight_layout()
+            box_path = os.path.join(output_dir, f"small_batch_boxplot_{label}_{timestamp}.png")
+            plt.savefig(box_path)
+            plt.close()
+            print(f"箱线图已保存到: {box_path}")
 
     summary = {
-        'experiment_type': 'small_batch_multi_seed',
+        'experiment_type': 'small_batch_multi_seed_multi_scenario',
         'timestamp': datetime.now().isoformat(),
         'seeds': seeds,
+        'eval_scenarios': eval_route_labels,
         'num_configs_per_seed': len(all_results) // len(seeds) if seeds else 0,
-        'fixed_baseline': fixed_baseline,
         'aggregated_results': [{
             'detection_rate': r['detection_rate'],
             'reward_fn': r['reward_fn'],
@@ -555,7 +454,7 @@ def generate_report(all_results, fixed_baselines, output_dir, seeds):
             'eval_results': r['eval_results'],
         } for r in aggregated],
     }
-    summary_path = os.path.join(output_dir, f"small_batch_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    summary_path = os.path.join(output_dir, f"small_batch_summary_{timestamp}.json")
     with open(summary_path, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     print(f"实验摘要已保存到: {summary_path}")
@@ -574,8 +473,8 @@ def parse_args():
                         help="逗号分隔的随机种子列表，多seed结果取均值±标准差")
     parser.add_argument("--total_timesteps", type=int, default=300_000,
                         help="每组实验的训练步数 (默认300K)")
-    parser.add_argument("--n_envs", type=int, default=2,
-                        help="并行环境数量 (默认2)")
+    parser.add_argument("--n_envs", type=int, default=1,
+                        help="并行环境数量 (默认1)")
     parser.add_argument("--eval_duration", type=int, default=3600,
                         help="评估模拟时长秒数 (默认3600)")
     parser.add_argument("--n_eval_episodes", type=int, default=5,
@@ -585,7 +484,10 @@ def parse_args():
                         help="SUMO网络文件路径")
     parser.add_argument("--route", type=str,
                         default="nets/2way-single-intersection/single-intersection-poisson.rou.xml",
-                        help="SUMO路由文件路径")
+                        help="SUMO路由文件路径（训练用）")
+    parser.add_argument("--eval_routes", type=str,
+                        default="nets/2way-single-intersection/single-intersection_medium.rou.xml,nets/2way-single-intersection/single-intersection_peak.rou.xml",
+                        help="逗号分隔的评估用SUMO路由文件路径列表")
     parser.add_argument("--output_dir", type=str, default="experiments/results",
                         help="实验输出目录")
     parser.add_argument("--skip_training", action="store_true",
@@ -603,10 +505,13 @@ def main():
     reward_fns = [x.strip() for x in args.reward_fns.split(',')]
     seeds = [int(x.strip()) for x in args.seeds.split(',')]
 
+    eval_route_files = [x.strip() for x in args.eval_routes.split(',')]
+    eval_route_labels = [Path(rf).stem for rf in eval_route_files]
+
     configs = list(product(detection_rates, reward_fns, seeds))
 
     print("=" * 60)
-    print("小批量实验配置 (多seed)")
+    print("小批量实验配置 (多seed, 多场景评估)")
     print("=" * 60)
     print(f"检测率: {detection_rates}")
     print(f"奖励函数: {reward_fns}")
@@ -616,6 +521,8 @@ def main():
     print(f"并行环境数: {args.n_envs}")
     print(f"评估时长: {args.eval_duration} 秒")
     print(f"评估轮次: {args.n_eval_episodes}")
+    print(f"训练车流文件: {args.route}")
+    print(f"评估车流文件: {eval_route_files}")
     print(f"输出目录: {args.output_dir}")
     print("=" * 60)
 
@@ -657,16 +564,20 @@ def main():
 
         eval_results = {}
         if not args.skip_eval and model_path:
-            eval_results = evaluate_model(
-                model_path=model_path,
-                detection_rate=dr,
-                reward_fn_name=rf,
-                net_file=args.net,
-                route_file=args.route,
-                eval_duration=args.eval_duration,
-                n_eval_episodes=args.n_eval_episodes,
-                seed=seed,
-            )
+            for eval_route, label in zip(eval_route_files, eval_route_labels):
+                print(f"\n  评估场景: {label} ({eval_route})")
+                route_results = evaluate_model(
+                    model_path=model_path,
+                    detection_rate=dr,
+                    reward_fn_name=rf,
+                    net_file=args.net,
+                    route_file=eval_route,
+                    eval_duration=args.eval_duration,
+                    n_eval_episodes=args.n_eval_episodes,
+                    seed=seed,
+                )
+                for k, v in route_results.items():
+                    eval_results[f"{label}_{k}"] = v
 
         all_results.append({
             'detection_rate': dr,
@@ -677,39 +588,13 @@ def main():
             'eval_results': eval_results,
         })
 
-    fixed_baselines = []
-    if not args.skip_eval:
-        for seed in seeds:
-            fb = evaluate_fixed_baseline(
-                net_file=args.net,
-                route_file=args.route,
-                eval_duration=args.eval_duration,
-                n_eval_episodes=args.n_eval_episodes,
-                seed=seed,
-            )
-            fixed_baselines.append(fb)
-
     if all_results and not args.skip_eval:
-        df_agg, df_per_seed = generate_report(all_results, fixed_baselines, args.output_dir, seeds)
+        df_agg, df_per_seed = generate_report(all_results, args.output_dir, seeds, eval_route_labels)
 
         print("\n" + "=" * 60)
         print("小批量实验结果汇总 (跨seed聚合)")
         print("=" * 60)
         print(df_agg.to_string(index=False))
-
-        if fixed_baselines:
-            fixed_baseline = {}
-            for mk in fixed_baselines[0].keys():
-                if mk.startswith('mean_'):
-                    values = [fb[mk] for fb in fixed_baselines if mk in fb]
-                    if values:
-                        base = mk.replace('mean_', '')
-                        fixed_baseline[f'mean_{base}'] = float(np.mean(values))
-                        fixed_baseline[f'std_{base}'] = float(np.std(values))
-
-            print("\n固定信号控制基线 (跨seed均值):")
-            for k, v in fixed_baseline.items():
-                print(f"  {k}: {v:.4f}")
 
         print("\n" + "=" * 60)
         print("实验完成！")

@@ -19,7 +19,7 @@ from sumo_rl.environment.observations import ObservationFunction
 from sumo_rl.environment.traffic_signal import TrafficSignal
 
 
-class TableIObservationFunction(ObservationFunction):
+class PartialObservationFunction(ObservationFunction):
     """用于部分检测车辆的观察类
     
     状态表示包括（所有特征均已归一化）：
@@ -29,7 +29,7 @@ class TableIObservationFunction(ObservationFunction):
       绿灯车道为正值，红灯车道为负值，范围 -1 到 1
     - 当前相位时间：从当前相位开始到现在的持续时间（秒），除以最大相位时长，范围 0-1
     - 黄灯指示器：黄灯相位指示器（0或1）
-    - 当前时间：一天中的当前时间（午夜后的小时数），归一化到0-1（除以24）
+    - 当前时间：一天中的当前时间（午夜后的小时数），使用正弦和余弦编码为2维向量，范围 -1 到 1
     
     属性:
         ts (TrafficSignal): 交通信号对象
@@ -100,11 +100,12 @@ class TableIObservationFunction(ObservationFunction):
             signed_car_counts.append(sign * normalized_count)
             signed_distances.append(sign * normalized_distance)
         
-        normalized_phase_time = [min(float(self.ts.time_since_last_phase_change) / self.ts.max_green_time, 1.0)]
+        normalized_phase_time = [min(float(self.ts.time_since_last_phase_change) / self.ts.max_green, 1.0)]
         
         amber_phase = [1.0 if self.ts.is_yellow else 0.0]
         
-        current_time = [float(self.ts.env.sim_step % (24 * 3600)) / (24 * 3600)]
+        t = float(self.ts.env.sim_step % (24 * 3600)) / (24 * 3600)  # [0, 1)
+        current_time = [np.sin(2 * np.pi * t), np.cos(2 * np.pi * t)]  # 2维，连续无断点
         
         observation = np.array(
             signed_car_counts + 
@@ -184,19 +185,19 @@ class TableIObservationFunction(ObservationFunction):
         
         return spaces.Box(
             low=np.array(
-                [-1] * n_lanes +       
-                [-1] * n_lanes +       
-                [0] +                  
-                [0] +                  
-                [0],                   
+                [-1] * n_lanes +
+                [-1] * n_lanes +
+                [0] +
+                [0] +
+                [-1, -1],
                 dtype=np.float32
             ),
             high=np.array(
-                [1] * n_lanes +        
-                [1] * n_lanes +        
-                [1] +                  
-                [1] +                  
-                [1],                   
+                [1] * n_lanes +
+                [1] * n_lanes +
+                [1] +
+                [1] +
+                [1, 1],
                 dtype=np.float32
             ),
         )
