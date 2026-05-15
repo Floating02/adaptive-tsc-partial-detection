@@ -8,7 +8,7 @@
 - 奖励函数: [average-speed, mixed]
 - 随机种子: [42, 123, 456] (多seed取均值±标准差)
 - 训练步数: 300,000 (完整训练为 6,000,000)
-- 并行环境: 2 (完整训练为 8)
+- 并行环境: 1 
 - 评估时长: 3600秒 (完整评估为 9000秒)
 - 评估轮次: 5 (完整评估为 5)
 
@@ -191,21 +191,19 @@ def evaluate_model(model_path, detection_rate, reward_fn_name, net_file, route_f
         obs, _ = eval_env.reset()
         episode_reward = 0
         done = False
-        info = None
-
         while not done:
             action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = eval_env.step(action)
+            obs, reward, terminated, truncated, _ = eval_env.step(action)
             done = terminated or truncated
             episode_reward += reward
 
         all_metrics['rewards'].append(episode_reward)
-        if info is not None and len(info) > 0:
-            info_dict = info[0]
-            all_metrics['waiting_times'].append(info_dict.get('system_mean_waiting_time', 0))
-            all_metrics['queue_lengths'].append(info_dict.get('system_total_stopped', 0))
-            all_metrics['speeds'].append(info_dict.get('system_mean_speed', 0))
-            all_metrics['throughputs'].append(info_dict.get('system_total_departed', 0))
+        if eval_env.metrics:
+            final_metrics = eval_env.metrics[-1]
+            all_metrics['waiting_times'].append(final_metrics.get('system_mean_waiting_time', 0))
+            all_metrics['queue_lengths'].append(final_metrics.get('system_total_stopped', 0))
+            all_metrics['speeds'].append(final_metrics.get('system_mean_speed', 0))
+            all_metrics['throughputs'].append(final_metrics.get('system_total_departed', 0))
 
         eval_env.close()
 

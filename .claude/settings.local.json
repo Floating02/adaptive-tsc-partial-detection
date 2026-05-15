@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import sumo_rl; print\\(sumo_rl.__file__\\)\")",
+      "Read(//c/Users/**)",
+      "Bash(python -c \"import stable_baselines3; print\\(stable_baselines3.__file__\\)\")",
+      "Bash(python -c \"import inspect, stable_baselines3.dqn.dqn as d; print\\(inspect.getmro\\(d.DQN\\)\\)\")",
+      "Bash(python -c \"from sumo_rl.environment.env import SumoEnvironment; import inspect; src = inspect.getsource\\(SumoEnvironment\\); lines = src.split\\('\\\\n'\\); [print\\(f'{i}: {line}'\\) for i, line in enumerate\\(lines\\) if 'metrics' in line.lower\\(\\)]\")",
+      "Bash(python -c \"from sumo_rl.environment.env import SumoEnvironment; import inspect; src = inspect.getsource\\(SumoEnvironment.compute_info if hasattr\\(SumoEnvironment, 'compute_info'\\) else SumoEnvironment._compute_info\\) if hasattr\\(SumoEnvironment, 'compute_info'\\) else None; print\\(src[:2000] if src else 'not found'\\)\")"
+    ]
+  }
+}
