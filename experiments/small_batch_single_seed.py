@@ -69,8 +69,7 @@ class DetailedTrainingCallback(BaseCallback):
         self._reward_history = deque(maxlen=100)
         self._last_loss = 0.0
         self._last_grad_norm = 0.0
-        self._last_q_mean = 0.0
-        self._metrics_start_idx = 0
+        self._ep_metrics = []
         self._ep_losses = []
         self._prev_n_updates = 0
 
@@ -91,16 +90,20 @@ class DetailedTrainingCallback(BaseCallback):
             self._prev_n_updates = current_n_updates
         self._last_grad_norm = logger_vals.get("train/grad_norm", self._last_grad_norm)
 
+        # 每步从 infos 累积指标
+        infos = self.locals.get("infos", [{}])
+        if infos and any(infos[0]):
+            self._ep_metrics.append(infos[0])
+
         if done:
             self._ep_count += 1
             self._reward_history.append(self._ep_reward)
 
-            episode_metrics = self._get_episode_metrics()
+            episode_metrics = self._ep_metrics
             avg_wt, avg_ql, avg_speed, avg_throughput = self._compute_averages(episode_metrics)
 
             ma_reward = float(np.mean(self._reward_history))
             epsilon = float(self.model.exploration_rate)
-            self._last_q_mean = self._compute_q_mean()
 
             buf_pos = 0
             buf_cap = 100000
@@ -121,31 +124,19 @@ class DetailedTrainingCallback(BaseCallback):
                   f"Loss: {mean_loss:.4f} ± {loss_std:.4f} (n={n_updates} updates) | ε: {epsilon:.3f}")
             print(f"         WT: {avg_wt:.1f}s | QL: {avg_ql:.1f} | "
                   f"Speed: {avg_speed:.1f}m/s | Through: {avg_throughput:.2f}")
-            print(f"         Q_mean: {self._last_q_mean:.1f} | GradNorm: {self._last_grad_norm:.2f} | "
-                  f"BufSize: {buf_pos}/{buf_cap}")
+            print(f"         GradNorm: {self._last_grad_norm:.2f} | BufSize: {buf_pos}/{buf_cap}")
 
             self.logger.record("episode/reward", self._ep_reward)
             self.logger.record("episode/reward_ma", ma_reward)
             self.logger.record("episode/loss", mean_loss)
             self.logger.record("episode/waiting_time", avg_wt)
-            self.logger.record("episode/q_mean", self._last_q_mean)
             self.logger.dump(self.num_timesteps)
 
             self._ep_reward = 0.0
             self._ep_losses = []
+            self._ep_metrics = []
 
         return True
-
-    def _get_episode_metrics(self):
-        """从 SumoEnvironment.metrics 中截取当前 episode 的所有 step 指标。"""
-        try:
-            env = self.model.env.envs[0]
-            all_metrics = getattr(env, "metrics", [])
-            episode_metrics = all_metrics[self._metrics_start_idx:]
-            self._metrics_start_idx = len(all_metrics)
-            return episode_metrics
-        except Exception:
-            return []
 
     def _compute_averages(self, metrics):
         if not metrics:
@@ -155,21 +146,6 @@ class DetailedTrainingCallback(BaseCallback):
         sp = np.mean([m.get("system_mean_speed", 0) for m in metrics])
         th = np.mean([m.get("system_total_departed", 0) for m in metrics])
         return float(wt), float(ql), float(sp), float(th)
-
-    def _compute_q_mean(self) -> float:
-        try:
-            obs = self.locals.get("new_obs")
-            if obs is None:
-                return 0.0
-            obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.model.device)
-            if obs_tensor.ndim == 1:
-                obs_tensor = obs_tensor.unsqueeze(0)
-            with torch.no_grad():
-                q_values = self.model.q_net(obs_tensor)
-                return float(q_values.mean().item())
-        except Exception:
-            return 0.0
-
 
 def make_env(net_file, route_file, detection_rate, reward_fn, seed=42,
              sim_duration=3600, use_gui=False):
