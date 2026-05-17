@@ -66,9 +66,8 @@ class DetailedTrainingCallback(BaseCallback):
         super().__init__(verbose)
         self._ep_reward = 0.0
         self._ep_count = 0
-        self._reward_history = deque(maxlen=100)
+        self._reward_history = deque(maxlen=10)
         self._last_loss = 0.0
-        self._last_grad_norm = 0.0
         self._ep_metrics = []
         self._ep_losses = []
         self._prev_n_updates = 0
@@ -82,13 +81,12 @@ class DetailedTrainingCallback(BaseCallback):
 
         self._ep_reward += reward
 
-        logger_vals = getattr(self.model, "logger", type("", (), {"name_to_value": {}})()).name_to_value
+        logger_vals = self.model.logger.name_to_value
         current_n_updates = getattr(self.model, "_n_updates", 0)
         if current_n_updates > self._prev_n_updates:
             self._last_loss = logger_vals.get("train/loss", self._last_loss)
             self._ep_losses.append(self._last_loss)
             self._prev_n_updates = current_n_updates
-        self._last_grad_norm = logger_vals.get("train/grad_norm", self._last_grad_norm)
 
         # 每步从 infos 累积指标
         infos = self.locals.get("infos", [{}])
@@ -105,12 +103,9 @@ class DetailedTrainingCallback(BaseCallback):
             ma_reward = float(np.mean(self._reward_history))
             epsilon = float(self.model.exploration_rate)
 
-            buf_pos = 0
-            buf_cap = 100000
-            rb = getattr(self.model, "replay_buffer", None)
-            if rb is not None:
-                buf_pos = getattr(rb, "pos", 0)
-                buf_cap = getattr(rb, "buffer_size", 100000)
+            rb = self.model.replay_buffer
+            buf_pos = buf_cap if rb.full else rb.pos
+            buf_cap = rb.buffer_size
 
             n_updates = len(self._ep_losses)
             if n_updates > 0:
@@ -123,8 +118,7 @@ class DetailedTrainingCallback(BaseCallback):
             print(f"[Ep {self._ep_count:03d}] R: {self._ep_reward:.1f} (MA: {ma_reward:.1f}) | "
                   f"Loss: {mean_loss:.4f} ± {loss_std:.4f} (n={n_updates} updates) | ε: {epsilon:.3f}")
             print(f"         WT: {avg_wt:.1f}s | QL: {avg_ql:.1f} | "
-                  f"Speed: {avg_speed:.1f}m/s | Through: {avg_throughput:.2f}")
-            print(f"         GradNorm: {self._last_grad_norm:.2f} | BufSize: {buf_pos}/{buf_cap}")
+                  f"Speed: {avg_speed:.1f}m/s | Through: {avg_throughput:.2f} | BufSize: {buf_pos}/{buf_cap}")
 
             self.logger.record("episode/reward", self._ep_reward)
             self.logger.record("episode/reward_ma", ma_reward)
