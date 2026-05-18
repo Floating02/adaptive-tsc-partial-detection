@@ -45,12 +45,15 @@ else:
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from sumo_rl import SumoEnvironment
+from sumo_rl.environment.traffic_signal import TrafficSignal
 from observations.observation import PartialObservationFunction
 from rewards import average_speed_reward, mixed_reward
 
 REWARD_FUNCTIONS = {
     'average-speed': average_speed_reward,
     'mixed': mixed_reward,
+    "queue": TrafficSignal.reward_fns["queue"],
+    "pressure": TrafficSignal.reward_fns["pressure"],
 }
 
 def linear_schedule(initial_value: float):
@@ -98,14 +101,14 @@ class DetailedTrainingCallback(BaseCallback):
             self._reward_history.append(self._ep_reward)
 
             episode_metrics = self._ep_metrics
-            avg_wt, avg_ql, avg_speed, avg_throughput = self._compute_averages(episode_metrics)
+            avg_wt, avg_ql, avg_speed, throughput = self._compute_averages(episode_metrics)
 
             ma_reward = float(np.mean(self._reward_history))
             epsilon = float(self.model.exploration_rate)
 
             rb = self.model.replay_buffer
-            buf_pos = buf_cap if rb.full else rb.pos
             buf_cap = rb.buffer_size
+            buf_pos = buf_cap if rb.full else rb.pos
 
             n_updates = len(self._ep_losses)
             if n_updates > 0:
@@ -118,7 +121,7 @@ class DetailedTrainingCallback(BaseCallback):
             print(f"[Ep {self._ep_count:03d}] R: {self._ep_reward:.1f} (MA: {ma_reward:.1f}) | "
                   f"Loss: {mean_loss:.4f} ± {loss_std:.4f} (n={n_updates} updates) | ε: {epsilon:.3f}")
             print(f"         WT: {avg_wt:.1f}s | QL: {avg_ql:.1f} | "
-                  f"Speed: {avg_speed:.1f}m/s | Through: {avg_throughput:.2f} | BufSize: {buf_pos}/{buf_cap}")
+                  f"Speed: {avg_speed:.1f}m/s | Through: {throughput:.2f} | BufSize: {buf_pos}/{buf_cap}")
 
             self.logger.record("episode/reward", self._ep_reward)
             self.logger.record("episode/reward_ma", ma_reward)
@@ -138,7 +141,7 @@ class DetailedTrainingCallback(BaseCallback):
         wt = np.mean([m.get("system_mean_waiting_time", 0) for m in metrics])
         ql = np.mean([m.get("system_total_stopped", 0) for m in metrics])
         sp = np.mean([m.get("system_mean_speed", 0) for m in metrics])
-        th = np.mean([m.get("system_total_departed", 0) for m in metrics])
+        th = np.sum([m.get("system_total_arrived", 0) for m in metrics])
         return float(wt), float(ql), float(sp), float(th)
 
 def make_env(net_file, route_file, detection_rate, reward_fn, seed=42,
@@ -331,15 +334,15 @@ def generate_report(all_results, output_dir, eval_route_labels, seed):
 
     csv_path = os.path.join(output_dir, f"small_batch_single_seed_{timestamp}.csv")
     df.to_csv(csv_path, index=False)
-    print(f"\n结果已保存到: {csv_path}")
+    print(f"\nResults saved to: {csv_path}")
 
     sns.set_style("whitegrid")
     plt.rcParams.update({'font.size': 11, 'figure.figsize': (14, 5), 'savefig.dpi': 200})
 
     key_metrics = [
-        ('mean_waiting_time', '平均等待时间 (秒)'),
-        ('mean_queue_length', '平均队列长度'),
-        ('mean_speed', '平均速度'),
+        ('mean_waiting_time', 'Avg Waiting Time (s)'),
+        ('mean_queue_length', 'Avg Queue Length'),
+        ('mean_speed', 'Avg Speed'),
     ]
 
     for label in eval_route_labels:
@@ -350,33 +353,36 @@ def generate_report(all_results, output_dir, eval_route_labels, seed):
         if not available_metrics:
             continue
 
-        fig, axes = plt.subplots(1, len(available_metrics), figsize=(5 * len(available_metrics), 5))
-        if len(available_metrics) == 1:
+        reward_fns = sorted(df['reward_fn'].unique())
+        n_rewards = len(reward_fns)
+        n_metrics = len(available_metrics)
+
+        fig, axes = plt.subplots(n_rewards, n_metrics,
+                                 figsize=(5 * n_metrics, 4 * n_rewards))
+        if n_rewards == 1 and n_metrics == 1:
+            axes = [[axes]]
+        elif n_rewards == 1:
             axes = [axes]
+        elif n_metrics == 1:
+            axes = [[ax] for ax in axes]
 
-        for ax, (metric, title) in zip(axes, available_metrics):
-            pivot = df.pivot(index='detection_rate', columns='reward_fn', values=metric)
-
-            x = np.arange(len(pivot.index))
-            width = 0.35
-            n_bars = len(pivot.columns)
-
-            for j, col in enumerate(pivot.columns):
-                offset = (j - n_bars / 2 + 0.5) * width
-                ax.bar(x + offset, pivot[col].values, width, label=col, alpha=0.85)
-
-            ax.set_title(f'{title} - {label}')
-            ax.set_xlabel('检测率')
-            ax.set_ylabel(title)
-            ax.set_xticks(x)
-            ax.set_xticklabels([str(v) for v in pivot.index])
-            ax.legend(fontsize=8)
+        for i, rf in enumerate(reward_fns):
+            rf_data = df[df['reward_fn'] == rf].sort_values('detection_rate')
+            for j, (metric, title) in enumerate(available_metrics):
+                ax = axes[i][j]
+                x = np.arange(len(rf_data))
+                ax.bar(x, rf_data[metric].values, 0.35, alpha=0.85)
+                ax.set_title(f'{title} - {label} ({rf})')
+                ax.set_xlabel('Detection Rate')
+                ax.set_ylabel(title)
+                ax.set_xticks(x)
+                ax.set_xticklabels([str(v) for v in rf_data['detection_rate']])
 
         plt.tight_layout()
         plot_path = os.path.join(output_dir, f"small_batch_single_comparison_{label}_{timestamp}.png")
         plt.savefig(plot_path)
         plt.close()
-        print(f"对比图已保存到: {plot_path}")
+        print(f"Comparison chart saved to: {plot_path}")
 
         radar_metrics = [f'{label_prefix}mean_waiting_time', f'{label_prefix}mean_queue_length', f'{label_prefix}mean_speed']
         available_radar = [m for m in radar_metrics if m in df.columns]
@@ -398,9 +404,9 @@ def generate_report(all_results, output_dir, eval_route_labels, seed):
             angles += angles[:1]
 
             labels_map = {
-                f'{label_prefix}mean_waiting_time': '等待时间',
-                f'{label_prefix}mean_queue_length': '队列长度',
-                f'{label_prefix}mean_speed': '速度',
+                f'{label_prefix}mean_waiting_time': 'Waiting Time',
+                f'{label_prefix}mean_queue_length': 'Queue Length',
+                f'{label_prefix}mean_speed': 'Speed',
             }
             categories = [labels_map.get(m, m) for m in available_radar]
             categories += categories[:1]
@@ -416,13 +422,13 @@ def generate_report(all_results, output_dir, eval_route_labels, seed):
 
             plt.xticks(angles[:-1], categories[:-1])
             plt.ylim(0, 1)
-            plt.title(f'性能雷达图 - {label}', size=14, y=1.08)
+            plt.title(f'Performance Radar - {label}', size=14, y=1.08)
             plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize=8)
 
             radar_path = os.path.join(output_dir, f"small_batch_single_radar_{label}_{timestamp}.png")
             plt.savefig(radar_path, bbox_inches='tight')
             plt.close()
-            print(f"雷达图已保存到: {radar_path}")
+            print(f"Radar chart saved to: {radar_path}")
 
     summary = {
         'experiment_type': 'small_batch_single_seed_multi_scenario',
@@ -439,7 +445,7 @@ def generate_report(all_results, output_dir, eval_route_labels, seed):
     summary_path = os.path.join(output_dir, f"small_batch_single_summary_{timestamp}.json")
     with open(summary_path, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
-    print(f"实验摘要已保存到: {summary_path}")
+    print(f"Experiment summary saved to: {summary_path}")
 
     return df
 
