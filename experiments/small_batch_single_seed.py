@@ -7,7 +7,7 @@
 - 检测率: [0.3, 0.5, 0.7, 0.9]
 - 奖励函数: [average-speed, mixed]
 - 随机种子: 42 (单seed)
-- 训练步数: 300,000
+- 训练步数: 100,000
 - 环境: 单环境（非并行）
 - 评估时长: 3600秒
 - 评估轮次: 5
@@ -17,7 +17,7 @@
 使用方法:
     python experiments/small_batch_single_seed.py
     python experiments/small_batch_single_seed.py --detection_rates "0.5,0.7" --reward_fns "mixed"
-    python experiments/small_batch_single_seed.py --total_timesteps 200000
+    python experiments/small_batch_single_seed.py --total_timesteps 100000
 """
 
 import os
@@ -34,6 +34,7 @@ from pathlib import Path
 
 from stable_baselines3.dqn.dqn import DQN
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 os.environ["LIBSUMO_AS_TRACI"] = "1"
 
@@ -168,10 +169,7 @@ def make_env(net_file, route_file, detection_rate, reward_fn, seed=42,
         max_green=50,
         enforce_max_green=True,
         single_agent=True,
-        reward_fn=reward_function,
-        observation_class=lambda ts: PartialObservationFunction(
-            ts, detection_rate=detection_rate, seed=seed + 2000
-        ),
+        reward_fn="queue",
         sumo_seed=seed,
     )
     return env
@@ -192,24 +190,33 @@ def train_single_config(detection_rate, reward_fn_name, total_timesteps,
         torch.cuda.manual_seed_all(seed)
 
     env = make_env(net_file, route_file, detection_rate, reward_fn_name, seed=seed)
+    env = DummyVecEnv([lambda: env])
+    env = VecNormalize(
+        env,
+        norm_obs=True,
+        norm_reward=True,
+        clip_obs=10.0,
+        gamma=0.99,
+        epsilon=1e-8,
+    )
 
-    policy_kwargs = dict(net_arch=[256, 256])
+    policy_kwargs = dict(net_arch=[64, 64])
 
     model = DQN(
         env=env,
         policy="MlpPolicy",
         policy_kwargs=policy_kwargs,
-        learning_rate=linear_schedule(1e-4),
-        learning_starts=5000,
+        learning_rate=5e-5,
+        learning_starts=2000,
         train_freq=4,
-        gradient_steps=-1,
+        gradient_steps=1,
         target_update_interval=2000,
         exploration_initial_eps=1.0,
         exploration_final_eps=0.05,
         exploration_fraction=0.3,
-        buffer_size=100000,
-        batch_size=256,
-        gamma=0.99,
+        buffer_size=10000,
+        batch_size=32,
+        gamma=0.95,
         tensorboard_log=f"{output_dir}/logs",
         verbose=1,
         device="cuda" if torch.cuda.is_available() else "cpu",
@@ -224,6 +231,9 @@ def train_single_config(detection_rate, reward_fn_name, total_timesteps,
 
     model_path = f"{output_dir}/models/dqn_table_i_dr{detection_rate}_{reward_fn_name}_seed{seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     model.save(model_path)
+    norm_path = f"{model_path}_vec_normalize.pkl"
+    env.save(norm_path)
+    print(f"VecNormalize stats saved to: {norm_path}")
     env.close()
 
     print(f"训练完成，耗时 {train_duration:.1f} 秒")
@@ -238,6 +248,7 @@ def evaluate_model(model_path, detection_rate, reward_fn_name, net_file, route_f
 
     model = DQN.load(model_path)
     reward_function = REWARD_FUNCTIONS[reward_fn_name]
+    norm_path = f"{model_path}_vec_normalize.pkl"
 
     all_metrics = {
         'rewards': [], 'waiting_times': [], 'queue_lengths': [],
@@ -245,7 +256,7 @@ def evaluate_model(model_path, detection_rate, reward_fn_name, net_file, route_f
     }
 
     for ep in range(n_eval_episodes):
-        eval_env = SumoEnvironment(
+        raw_env = SumoEnvironment(
             net_file=net_file,
             route_file=route_file,
             use_gui=False,
@@ -258,25 +269,37 @@ def evaluate_model(model_path, detection_rate, reward_fn_name, net_file, route_f
             enforce_max_green=True,
             single_agent=True,
             reward_fn=reward_function,
-            observation_class=lambda ts, e_idx=ep: PartialObservationFunction(
-                ts, detection_rate=detection_rate, seed=seed + 4000 + e_idx
-            ),
             sumo_seed=seed + ep,
             add_system_info=True,
             add_per_agent_info=False,
         )
 
-        obs, _ = eval_env.reset()
+        eval_env = DummyVecEnv([lambda: raw_env])
+        if os.path.exists(norm_path):
+            eval_env = VecNormalize.load(norm_path, eval_env)
+            eval_env.training = False
+            eval_env.norm_reward = False
+        else:
+            eval_env = VecNormalize(
+                eval_env,
+                norm_obs=True,
+                norm_reward=False,
+                clip_obs=10.0,
+                gamma=0.99,
+                epsilon=1e-8,
+                training=False,
+            )
+
+        obs = eval_env.reset()
         episode_reward = 0.0
         done = False
 
-        while not done:
+        while not done.any():
             action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, _ = eval_env.step(action)
-            done = terminated or truncated
-            episode_reward += reward
+            obs, reward, done, info = eval_env.step(action)
+            episode_reward += reward[0]
 
-        ep_metrics = eval_env.metrics
+        ep_metrics = raw_env.metrics
         avg_wt = float(np.mean([m.get('system_mean_waiting_time', 0) for m in ep_metrics])) if ep_metrics else 0.0
         avg_ql = float(np.mean([m.get('system_total_stopped', 0) for m in ep_metrics])) if ep_metrics else 0.0
         avg_speed = float(np.mean([m.get('system_mean_speed', 0) for m in ep_metrics])) if ep_metrics else 0.0
@@ -459,8 +482,8 @@ def parse_args():
                         help="逗号分隔的奖励函数列表")
     parser.add_argument("--seed", type=int, default=42,
                         help="随机种子 (默认42)")
-    parser.add_argument("--total_timesteps", type=int, default=300_000,
-                        help="每组实验的训练步数 (默认300K)")
+    parser.add_argument("--total_timesteps", type=int, default=100_000,
+                        help="每组实验的训练步数 (默认100K)")
     parser.add_argument("--eval_duration", type=int, default=3600,
                         help="评估模拟时长秒数 (默认3600)")
     parser.add_argument("--n_eval_episodes", type=int, default=5,
@@ -469,7 +492,7 @@ def parse_args():
                         default="nets/2way-single-intersection/single-intersection.net.xml",
                         help="SUMO网络文件路径")
     parser.add_argument("--route", type=str,
-                        default="nets/2way-single-intersection/single-intersection-poisson.rou.xml",
+                        default="nets/2way-single-intersection/single-intersection_medium.rou.xml",
                         help="SUMO路由文件路径（训练用）")
     parser.add_argument("--eval_routes", type=str,
                         default="nets/2way-single-intersection/single-intersection_medium.rou.xml,nets/2way-single-intersection/single-intersection_peak.rou.xml",
