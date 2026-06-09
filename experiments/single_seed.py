@@ -1,19 +1,4 @@
-"""小批量实验（单seed版）：快速验证不同检测率与奖励函数组合的性能
-
-相比 small_batch.py 的多seed取均值设计，本脚本每个配置仅运行单个seed，
-进一步缩减实验时间，适合快速筛选有潜力的配置组合。
-
-实验设计：
-- 检测率: [0.3, 0.5, 0.7, 0.9]
-- 奖励函数: [average-speed, mixed]
-- 随机种子: 42 (单seed)
-- 训练步数: 100,000
-- 环境: 单环境（非并行）
-- 评估时长: 3600秒
-- 评估轮次: 5
-
-总计 4 × 2 = 8 组实验
-
+"""
 使用方法:
     python experiments/small_batch_single_seed.py
     python experiments/small_batch_single_seed.py --detection_rates "0.5,0.7" --reward_fns "mixed"
@@ -145,6 +130,19 @@ class DetailedTrainingCallback(BaseCallback):
         th = np.sum([m.get("system_total_arrived", 0) for m in metrics])
         return float(wt), float(ql), float(sp), float(th)
 
+def _partial_obs_factory(detection_rate: float, seed: int):
+    """返回一个闭包，供 SumoEnvironment 的 observation_class 参数使用。"""
+    def factory(ts: TrafficSignal) -> PartialObservationFunction:
+        return PartialObservationFunction(
+            ts=ts,
+            detection_rate=detection_rate,
+            max_car_capacity=10,
+            max_phase_duration=120,
+            seed=seed,
+        )
+    return factory
+
+
 def make_env(net_file, route_file, detection_rate, reward_fn, seed=42,
              sim_duration=3600, use_gui=False):
     if isinstance(reward_fn, str):
@@ -171,6 +169,7 @@ def make_env(net_file, route_file, detection_rate, reward_fn, seed=42,
         single_agent=True,
         reward_fn="queue",
         sumo_seed=seed,
+        observation_class=_partial_obs_factory(detection_rate, seed),
     )
     return env
 
@@ -256,6 +255,7 @@ def evaluate_model(model_path, detection_rate, reward_fn_name, net_file, route_f
     }
 
     for ep in range(n_eval_episodes):
+        eval_seed = seed + ep
         raw_env = SumoEnvironment(
             net_file=net_file,
             route_file=route_file,
@@ -269,9 +269,10 @@ def evaluate_model(model_path, detection_rate, reward_fn_name, net_file, route_f
             enforce_max_green=True,
             single_agent=True,
             reward_fn=reward_function,
-            sumo_seed=seed + ep,
+            sumo_seed=eval_seed,
             add_system_info=True,
             add_per_agent_info=False,
+            observation_class=_partial_obs_factory(detection_rate, eval_seed),
         )
 
         eval_env = DummyVecEnv([lambda: raw_env])
@@ -292,14 +293,17 @@ def evaluate_model(model_path, detection_rate, reward_fn_name, net_file, route_f
 
         obs = eval_env.reset()
         episode_reward = 0.0
-        done = False
+        done = np.array([False])
+
+        # 保存 metrics 列表引用，防止 DummyVecEnv 在 episode 结束时的
+        # 自动 reset() 清空 raw_env.metrics（reset 会创建新列表，但原有
+        # 列表对象通过此引用保留，不受影响）
+        ep_metrics = raw_env.metrics
 
         while not done.any():
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, done, info = eval_env.step(action)
             episode_reward += reward[0]
-
-        ep_metrics = raw_env.metrics
         avg_wt = float(np.mean([m.get('system_mean_waiting_time', 0) for m in ep_metrics])) if ep_metrics else 0.0
         avg_ql = float(np.mean([m.get('system_total_stopped', 0) for m in ep_metrics])) if ep_metrics else 0.0
         avg_speed = float(np.mean([m.get('system_mean_speed', 0) for m in ep_metrics])) if ep_metrics else 0.0
@@ -474,7 +478,7 @@ def generate_report(all_results, output_dir, eval_route_labels, seed):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="小批量实验（单seed版）：快速验证不同检测率与奖励函数组合")
+    parser = argparse.ArgumentParser(description="实验（单seed版）：快速验证不同检测率与奖励函数组合")
 
     parser.add_argument("--detection_rates", type=str, default="0.3,0.5,0.7,0.9",
                         help="逗号分隔的检测率列表")
@@ -519,7 +523,7 @@ def main():
     configs = list(product(detection_rates, reward_fns))
 
     print("=" * 60)
-    print("小批量实验配置 (单seed, 多场景评估)")
+    print("实验配置 (单seed, 多场景评估)")
     print("=" * 60)
     print(f"检测率: {detection_rates}")
     print(f"奖励函数: {reward_fns}")
@@ -598,7 +602,7 @@ def main():
         df = generate_report(all_results, args.output_dir, eval_route_labels, args.seed)
 
         print("\n" + "=" * 60)
-        print("小批量实验结果汇总 (单seed)")
+        print("实验结果汇总 (单seed)")
         print("=" * 60)
         print(df.to_string(index=False))
 
