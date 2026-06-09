@@ -129,31 +129,14 @@ R = -total_queued
 
 ## 安装与配置
 
-### 1. 安装 SUMO
+### 1. 安装 sumo-rl
 
 **Windows：**
 
-```powershell
-# 从 https://sumo.dlr.de/docs/Installing/index.html 下载安装
-[System.Environment]::SetEnvironmentVariable("SUMO_HOME", "C:\Program Files (x86)\Eclipse\Sumo", "User")
-```
-
-**Linux (Ubuntu/Debian)：**
-
 ```bash
-sudo add-apt-repository ppa:sumo/stable
-sudo apt-get update
-sudo apt-get install sumo sumo-tools sumo-doc
-echo 'export SUMO_HOME="/usr/share/sumo"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-验证安装：
-
-```bash
-echo $SUMO_HOME        # Linux
-echo %SUMO_HOME%       # Windows CMD
-$env:SUMO_HOME         # Windows PowerShell
+git clone https://github.com/LucasAlegre/sumo-rl
+cd sumo-rl
+pip install -e .
 ```
 
 ### 2. 安装 Python 依赖
@@ -162,26 +145,8 @@ $env:SUMO_HOME         # Windows PowerShell
 git clone https://github.com/yourusername/adaptive-tsc-partial-detection.git
 cd adaptive-tsc-partial-detection
 
-# 创建并激活虚拟环境
-python -m venv venv
-source venv/bin/activate      # Linux
-.\venv\Scripts\Activate.ps1   # Windows
-
 # 安装依赖
 pip install -r requirements.txt
-```
-
-### 3. 安装 sumo-rl
-
-```bash
-pip install git+https://github.com/LucasAlegre/sumo-rl.git
-```
-
-### 4. 验证安装
-
-```bash
-python -c "import sumo_rl; print('SUMO-RL OK')"
-python -c "import stable_baselines3; print('SB3 OK')"
 ```
 
 ## 使用指南
@@ -332,20 +297,6 @@ def my_custom_reward(ts):
 from stable_baselines3 import PPO
 model = PPO("MlpPolicy", env, learning_rate=3e-4, n_steps=2048, batch_size=64)
 ```
-
-## 常见问题
-
-**Q: `ImportError: 请声明环境变量 'SUMO_HOME'`**
-
-需设置 `SUMO_HOME` 环境变量：Windows 用 `$env:SUMO_HOME = "..."`，Linux 用 `export SUMO_HOME="..."`。
-
-**Q: Windows 下多进程训练报错**
-
-Libsumo 与 Python 多进程存在兼容性问题。实验脚本默认使用 `DummyVecEnv`（单进程），避免此问题。
-
-**Q: CUDA out of memory**
-
-将 DQN 的 `device` 参数改为 `"cpu"`。
 
 ## 许可证
 
